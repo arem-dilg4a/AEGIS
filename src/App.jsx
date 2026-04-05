@@ -261,7 +261,7 @@ function Corners({ color = "rgba(0,200,255,0.5)", size = 10 }) {
 }
 
 // ─── BUBBLE ───────────────────────────────────────────────────────────────────
-function Bubble({ text, role, fading }) {
+function Bubble({ text, role, fading, panelLeft }) {
   const [shown, setShown] = useState(role === "user" ? text : "");
   const ivRef = useRef(null);
 
@@ -297,7 +297,7 @@ function Bubble({ text, role, fading }) {
         : "0 0 20px rgba(0,160,255,0.12), inset 0 1px 0 rgba(0,200,255,0.08)",
       opacity: fading ? 0 : 1,
       transition: "opacity 0.5s ease",
-      animation: "slideIn 0.2s ease",
+      animation: `${panelLeft ? "slideInRight" : "slideIn"} 0.2s ease`,
       maxWidth: "100%",
     }}>
       {!isUser && (
@@ -582,67 +582,90 @@ export default function App() {
   const inputRef   = useRef(null);
   const abortRef   = useRef(null);
 
-  // ── Layout refs ───────────────────────────────────────────────────────────
-  const panelSideRef          = useRef("right");
-  const physicallyExpandedRef = useRef(false);
-  const panelVisibleRef       = useRef(true);
+  // Layout refs & state
+  //
+  // panelSide is React STATE so flexDirection updates in the same render as
+  // setPanelVisible(true) — no frame where the orb is on the wrong side.
+  const [panelSide, setPanelSide]       = useState("right");
+  // Mirror ref: lets applyBoundsCore read the current side synchronously
+  // inside an async function without a stale-closure problem.
+  const panelSideRef                    = useRef("right");
+  const physicallyExpandedRef           = useRef(false);
+  // Serialisation guard — prevents two setBounds calls from overlapping.
+  const boundsInFlightRef               = useRef(null);
+  const pendingBoundsRef                = useRef(null);
+  // Real React state so hide/show is guaranteed to paint before/after the
+  // Electron window move.
+  const [panelVisible, setPanelVisible] = useState(true);
 
-  const [, forceUpdate] = useReducer(n => n + 1, 0);
-
-  // ── Derived layout values ─────────────────────────────────────────────────
-  const winW      = (panelOpen || !!alertMsg) ? ORB_D + 6 + PANEL_W : ORB_D;
+  // Derived layout values
+  const winW      = (panelOpen || !!alertMsg || bubbles.length > 0) ? ORB_D + 6 + PANEL_W : ORB_D;
   const winH      = ORB_D;
   const showPanel = panelOpen || !!alertMsg || bubbles.length > 0;
-  const panelLeft = panelSideRef.current === "left";
+  const panelLeft = panelSide === "left";   // reads React state, not a ref
 
-  // ── applyBounds ────────────────────────────────────────────────────────────
-  //
-  // FIX: Capture physicallyExpandedRef.current synchronously at the very top,
-  // before any async gap or state mutation can change it. This value correctly
-  // reflects whether the Electron window is CURRENTLY wide when this function
-  // is called, regardless of what React state says at this point.
-  const applyBounds = useCallback(async (newW, newH) => {
+  // applyBoundsCore — the actual async resize logic
+  const applyBoundsCore = useCallback(async (newW, newH) => {
     if (uiMode === "history" || !apiKey) return;
 
-    // ↓ FIX: read physical state NOW, synchronously, before anything mutates it
-    const wasActuallyExpanded = physicallyExpandedRef.current;
+    // Capture both pieces of physical truth synchronously before any await.
+    const wasExpanded = physicallyExpandedRef.current;
+    const currentSide = panelSideRef.current;
 
-    // Hide panel while the window is moving to prevent painting in wrong spot.
-    panelVisibleRef.current = false;
-    forceUpdate();
+    // Hide panel — React will flush this setState before reaching the await.
+    setPanelVisible(false);
 
     const currentWinX = window.screenX;
     const currentWinY = window.screenY;
     const currentW    = window.outerWidth;
 
-    // Derive the orb's TRUE screen X from physical window geometry.
-    // If window is currently expanded with panel on the LEFT, the orb sits
-    // at the far-right end of the window. Otherwise it's at the left edge.
-    // ↓ FIX: use wasActuallyExpanded instead of the passed-in wasExpanded arg
-    const orbX = (panelSideRef.current === "left" && wasActuallyExpanded)
+    // When the panel is on the LEFT and the window is wide, the orb lives at
+    // the FAR-RIGHT edge of the Electron window, not at screenX.
+    const orbX = (currentSide === "left" && wasExpanded)
       ? currentWinX + currentW - ORB_D
       : currentWinX;
-    const orbY = currentWinY;
 
-    const chosenSide = await window.electronAPI?.setBounds?.(orbX, orbY, newW, newH, ORB_D, PANEL_W);
+    const chosenSide = await window.electronAPI?.setBounds?.(orbX, currentWinY, newW, newH, ORB_D, PANEL_W);
     if (!chosenSide) window.electronAPI?.resize?.(newW, newH);
 
-    // Update side ref synchronously before the next paint.
-    if (chosenSide) panelSideRef.current = chosenSide;
-
-    // ↓ FIX: update physical state AFTER setBounds resolves, not before
+    const newSide = chosenSide ?? currentSide;
+    // Update mirror ref first (sync, used by the next orbX calculation).
+    panelSideRef.current = newSide;
     physicallyExpandedRef.current = newW > ORB_D;
 
-    // Reveal panel on next animation frame — Electron and DOM are now aligned.
-    requestAnimationFrame(() => {
-      panelVisibleRef.current = true;
-      forceUpdate();
-    });
+    // One rAF so Electron's reposition is composited before we repaint.
+    await new Promise((r) => requestAnimationFrame(r));
+
+    // Both state updates land in the same React render batch:
+    //   panelSide    => flips flexDirection to the correct side
+    //   panelVisible => makes the panel visible
+    // This ensures the orb is NEVER seen on the wrong side of the container.
+    setPanelSide(newSide);
+    setPanelVisible(true);
   }, [uiMode, apiKey]);
 
+  const applyBounds = useCallback((newW, newH) => {
+    if (boundsInFlightRef.current) {
+      // Another call is running — park the latest request and return.
+      pendingBoundsRef.current = { newW, newH };
+      return;
+    }
+
+    const run = async (w, h) => {
+      boundsInFlightRef.current = applyBoundsCore(w, h).finally(async () => {
+        boundsInFlightRef.current = null;
+        // If a newer request arrived while we were busy, run it now.
+        if (pendingBoundsRef.current) {
+          const { newW: pw, newH: ph } = pendingBoundsRef.current;
+          pendingBoundsRef.current = null;
+          run(pw, ph);
+        }
+      });
+    };
+    run(newW, newH);
+  }, [applyBoundsCore]);
+
   // ── Trigger resize whenever target window size changes ────────────────────
-  // FIX: No longer passes physicallyExpandedRef.current as a third argument —
-  // applyBounds reads it internally at call time, eliminating the stale-value race.
   useEffect(() => {
     if (uiMode === "history" || !apiKey) return;
     applyBounds(winW, winH);
@@ -650,22 +673,12 @@ export default function App() {
   }, [winW, winH, uiMode, apiKey]);
 
   // ── handleDragEnd ──────────────────────────────────────────────────────────
+  // Re-use applyBounds after drag so the in-flight guard and side-ref stay consistent.
   const handleDragEnd = useCallback(() => {
-    const currentWinX = window.screenX;
-    const currentWinY = window.screenY;
-    const currentW    = window.outerWidth;
-    const currentH    = window.outerHeight;
-
-    const orbX = (panelSideRef.current === "left" && physicallyExpandedRef.current)
-      ? currentWinX + currentW - ORB_D
-      : currentWinX;
-
-    window.electronAPI?.setBounds?.(orbX, currentWinY, currentW, currentH, ORB_D, PANEL_W)
-      .then((chosenSide) => {
-        if (chosenSide) panelSideRef.current = chosenSide;
-      })
-      .catch(() => {});
-  }, []);
+    applyBounds(winW, winH);
+  // winW/winH are stable primitives at drag-end time; applyBounds is memoised.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applyBounds, winW, winH]);
 
   const { onMouseDown: dragStart, wasDrag } = useDrag(handleDragEnd);
 
@@ -894,7 +907,7 @@ export default function App() {
             paddingLeft: panelLeft ? 0 : 6,
             paddingRight: panelLeft ? 6 : 0,
             alignSelf: "center",
-            visibility: panelVisibleRef.current ? "visible" : "hidden",
+            visibility: panelVisible ? "visible" : "hidden",
           }}
         >
           {alertMsg && (
@@ -920,7 +933,7 @@ export default function App() {
           )}
 
           {bubbles.map((b) => (
-            <Bubble key={b.id} text={b.text} role={b.role} fading={b.fading} />
+            <Bubble key={b.id} text={b.text} role={b.role} fading={b.fading} panelLeft={panelLeft} />
           ))}
 
           {uiMode === "input" && (
@@ -941,7 +954,8 @@ export default function App() {
 
       <style>{`
         @keyframes blink   { 0%,100%{opacity:1} 50%{opacity:0} }
-        @keyframes slideIn { from{opacity:0;transform:translateX(-8px) scale(0.97)} to{opacity:1;transform:none} }
+        @keyframes slideIn     { from{opacity:0;transform:translateX(-8px) scale(0.97)} to{opacity:1;transform:none} }
+        @keyframes slideInRight { from{opacity:0;transform:translateX(8px)  scale(0.97)} to{opacity:1;transform:none} }
         ::-webkit-scrollbar { width:2px; }
         ::-webkit-scrollbar-thumb { background:rgba(0,180,255,0.15); border-radius:2px; }
         textarea { overflow:hidden; }
