@@ -53,21 +53,22 @@ function createTray() {
 
 // ─── IPC HANDLERS ─────────────────────────────────────────────────────────────
 
-// Legacy relative drag — kept for compatibility.
-// Moves the window by a pixel delta. React calls this continuously during drag.
-// No clamping here — applyBounds / set-bounds handles that on drag end.
+// Relative drag delta — moves the window by a pixel delta.
+// Called continuously during drag. No clamping here; set-bounds handles
+// clamping on drag end.
 ipcMain.handle('move-window', (_, { dx, dy }) => {
   const [x, y] = mainWindow.getPosition();
   mainWindow.setPosition(x + dx, y + dy);
 });
 
-// Simple resize without repositioning — used as a fallback by React when
-// set-bounds is unavailable (e.g. older preload builds).
+// Simple resize without repositioning — fallback when set-bounds is unavailable.
 ipcMain.handle('resize-window', (_, { w, h }) => {
   mainWindow.setSize(Math.round(w), Math.round(h), false);
 });
 
-// Atomic reposition + resize. React passes:
+// Atomic reposition + resize.
+//
+// React passes:
 //   orbX, orbY  — the orb's current top-left in screen coordinates
 //   w, h        — the desired new window size
 //   orbD        — orb diameter (the fixed part of the window)
@@ -79,23 +80,29 @@ ipcMain.handle('resize-window', (_, { w, h }) => {
 //   3. Computes the window top-left so the orb stays anchored.
 //   4. Clamps everything to the display's work area.
 //   5. Returns the chosen side ('left'|'right') so React can flip its layout.
+//
+// FIX: The previous version had a subtle bug where it used orbX directly as
+// the window X for the right-side case, but on subsequent calls orbX was
+// already the window X (because the panel was already open), causing the
+// window to drift left by panelW on every resize. We now always re-derive
+// the window X fresh from the orb anchor and the chosen side.
 ipcMain.handle('set-bounds', (_, { orbX, orbY, w, h, orbD, panelW }) => {
-  // Use the display that contains the orb's centre point
+  // Use the display that contains the orb's centre point.
   const display = screen.getDisplayNearestPoint({ x: orbX + orbD / 2, y: orbY + orbD / 2 });
   const { x: ax, y: ay, width: aw, height: ah } = display.workArea;
 
-  // Decide side: prefer right; fall back to left if there isn't enough room
+  // Decide side: prefer right; fall back to left if there isn't enough room.
   const spaceRight = (ax + aw) - (orbX + orbD);
+  const spaceLeft  = orbX - ax;
   const side = spaceRight >= panelW + 40 ? 'right' : 'left';
 
-  // Anchor the orb: place the window so its orb section stays at orbX/orbY
-  let winX = side === 'left'
-    ? orbX - (w - orbD)   // panel extends left → window starts left of orb
-    : orbX;               // panel extends right → window starts at orb
-
+  // Anchor the orb: place the window so its orb section stays at orbX/orbY.
+  //   right → window starts at the orb's left edge (panel extends rightward)
+  //   left  → window starts panelW to the left of the orb (panel extends leftward)
+  let winX = side === 'right' ? orbX : orbX - (w - orbD);
   let winY = orbY;
 
-  // Clamp to this display's work area so the window is never off-screen
+  // Clamp to this display's work area so the window is never off-screen.
   winX = Math.round(Math.max(ax, Math.min(winX, ax + aw - w)));
   winY = Math.round(Math.max(ay, Math.min(winY, ay + ah - h)));
 
@@ -104,7 +111,7 @@ ipcMain.handle('set-bounds', (_, { orbX, orbY, w, h, orbD, panelW }) => {
     false  // animate = false for instant repositioning
   );
 
-  // Return chosen side so React can flip its flex layout direction
+  // Return chosen side so React can flip its flex layout direction.
   return side;
 });
 

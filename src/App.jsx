@@ -570,12 +570,7 @@ export default function App() {
   const [input,      setInput]      = useState("");
   const [loading,    setLoading]    = useState(false);
   const [retryCount, setRetryCount] = useState(0);
-  const [panelSide,  setPanelSide]  = useState("right");
 
-  // panelOpen is the SINGLE source of truth for whether the window is expanded.
-  // It is only ever set by explicit user actions or AEGIS alerts — never by
-  // bubble arrival/expiry. This prevents the window from jumping when bubbles
-  // time out.
   const [panelOpen, setPanelOpen] = useState(false);
 
   const [chat, dispatch] = useReducer(chatReducer, { messages: [], history: [] });
@@ -587,39 +582,90 @@ export default function App() {
   const inputRef   = useRef(null);
   const abortRef   = useRef(null);
 
-  // winW is driven by panelOpen / alertMsg only — not by bubbles.
-  const winW = (panelOpen || !!alertMsg) ? ORB_D + 6 + PANEL_W : ORB_D;
-  const winH = ORB_D;
+  // ── Layout refs ───────────────────────────────────────────────────────────
+  const panelSideRef          = useRef("right");
+  const physicallyExpandedRef = useRef(false);
+  const panelVisibleRef       = useRef(true);
 
-  // showPanel controls rendering of the side panel div. Bubbles can appear
-  // inside it even when panelOpen is false (they keep the div mounted while
-  // visible) but that never changes winW.
+  const [, forceUpdate] = useReducer(n => n + 1, 0);
+
+  // ── Derived layout values ─────────────────────────────────────────────────
+  const winW      = (panelOpen || !!alertMsg) ? ORB_D + 6 + PANEL_W : ORB_D;
+  const winH      = ORB_D;
   const showPanel = panelOpen || !!alertMsg || bubbles.length > 0;
+  const panelLeft = panelSideRef.current === "left";
 
-  // ── applyBounds ──────────────────────────────────────────────────────────────
+  // ── applyBounds ────────────────────────────────────────────────────────────
+  //
+  // FIX: Capture physicallyExpandedRef.current synchronously at the very top,
+  // before any async gap or state mutation can change it. This value correctly
+  // reflects whether the Electron window is CURRENTLY wide when this function
+  // is called, regardless of what React state says at this point.
   const applyBounds = useCallback(async (newW, newH) => {
     if (uiMode === "history" || !apiKey) return;
-    const orbX = panelSide === "left" && (panelOpen || !!alertMsg)
-      ? window.screenX + PANEL_W + 6
-      : window.screenX;
-    const orbY = window.screenY;
-    const side = await window.electronAPI?.setBounds?.(orbX, orbY, newW, newH, ORB_D, PANEL_W);
-    if (!side) window.electronAPI?.resize?.(newW, newH);
-    if (side) setPanelSide(side);
-  }, [uiMode, apiKey, panelSide, panelOpen, alertMsg]);
 
-  // Resize only when winW/winH actually change — which only happens when
-  // panelOpen or alertMsg changes, not when bubbles come and go.
+    // ↓ FIX: read physical state NOW, synchronously, before anything mutates it
+    const wasActuallyExpanded = physicallyExpandedRef.current;
+
+    // Hide panel while the window is moving to prevent painting in wrong spot.
+    panelVisibleRef.current = false;
+    forceUpdate();
+
+    const currentWinX = window.screenX;
+    const currentWinY = window.screenY;
+    const currentW    = window.outerWidth;
+
+    // Derive the orb's TRUE screen X from physical window geometry.
+    // If window is currently expanded with panel on the LEFT, the orb sits
+    // at the far-right end of the window. Otherwise it's at the left edge.
+    // ↓ FIX: use wasActuallyExpanded instead of the passed-in wasExpanded arg
+    const orbX = (panelSideRef.current === "left" && wasActuallyExpanded)
+      ? currentWinX + currentW - ORB_D
+      : currentWinX;
+    const orbY = currentWinY;
+
+    const chosenSide = await window.electronAPI?.setBounds?.(orbX, orbY, newW, newH, ORB_D, PANEL_W);
+    if (!chosenSide) window.electronAPI?.resize?.(newW, newH);
+
+    // Update side ref synchronously before the next paint.
+    if (chosenSide) panelSideRef.current = chosenSide;
+
+    // ↓ FIX: update physical state AFTER setBounds resolves, not before
+    physicallyExpandedRef.current = newW > ORB_D;
+
+    // Reveal panel on next animation frame — Electron and DOM are now aligned.
+    requestAnimationFrame(() => {
+      panelVisibleRef.current = true;
+      forceUpdate();
+    });
+  }, [uiMode, apiKey]);
+
+  // ── Trigger resize whenever target window size changes ────────────────────
+  // FIX: No longer passes physicallyExpandedRef.current as a third argument —
+  // applyBounds reads it internally at call time, eliminating the stale-value race.
   useEffect(() => {
     if (uiMode === "history" || !apiKey) return;
     applyBounds(winW, winH);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [winW, winH, uiMode, apiKey]);
 
-  // Re-clamp after drag ends
+  // ── handleDragEnd ──────────────────────────────────────────────────────────
   const handleDragEnd = useCallback(() => {
-    applyBounds(winW, winH);
-  }, [applyBounds, winW, winH]);
+    const currentWinX = window.screenX;
+    const currentWinY = window.screenY;
+    const currentW    = window.outerWidth;
+    const currentH    = window.outerHeight;
+
+    const orbX = (panelSideRef.current === "left" && physicallyExpandedRef.current)
+      ? currentWinX + currentW - ORB_D
+      : currentWinX;
+
+    window.electronAPI?.setBounds?.(orbX, currentWinY, currentW, currentH, ORB_D, PANEL_W)
+      .then((chosenSide) => {
+        if (chosenSide) panelSideRef.current = chosenSide;
+      })
+      .catch(() => {});
+  }, []);
 
   const { onMouseDown: dragStart, wasDrag } = useDrag(handleDragEnd);
 
@@ -627,7 +673,7 @@ export default function App() {
     if (uiMode === "input") setTimeout(() => inputRef.current?.focus(), 80);
   }, [uiMode]);
 
-  // ── Load persisted chat on mount ─────────────────────────────────────────────
+  // ── Load persisted chat on mount ──────────────────────────────────────────
   useEffect(() => {
     if (!apiKey) return;
     const saved = db.get("aegis_chat");
@@ -642,14 +688,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey]);
 
-  // ── Alert appearing opens the panel ─────────────────────────────────────────
+  // ── Alert appearing opens the panel ───────────────────────────────────────
   useEffect(() => {
     if (alertMsg) setPanelOpen(true);
   }, [alertMsg]);
 
-  // ── Bubble helpers ───────────────────────────────────────────────────────────
-  // Bubbles render inside whatever panel state is already set.
-  // Their expiry never touches panelOpen or winW.
+  // ── Bubble helpers ─────────────────────────────────────────────────────────
   const addBubble = useCallback((text, role) => {
     const id = ++bidRef.current;
     setBubbles((prev) => [...prev.slice(-2), { id, text, role, fading: false }]);
@@ -660,7 +704,7 @@ export default function App() {
     }, ttl);
   }, []);
 
-  // ── Autonomous thinking ──────────────────────────────────────────────────────
+  // ── Autonomous thinking ────────────────────────────────────────────────────
   const autonomousThink = useCallback(async (currentHistory) => {
     if (busyRef.current) { scheduleThinkWith(currentHistory); return; }
     busyRef.current = true;
@@ -695,15 +739,13 @@ export default function App() {
     thinkTimer.current = setTimeout(() => autonomousThink([]), THINK_INTERVAL);
   }
 
-  // ── Send message ─────────────────────────────────────────────────────────────
+  // ── Send message ───────────────────────────────────────────────────────────
   const send = useCallback(async () => {
     const text = input.trim();
     if (!text || loading || busyRef.current) return;
 
     setInput("");
     setUiMode("orb");
-    // Keep panelOpen = true while exchange is in flight so bubbles have room.
-    // We close it explicitly once the reply is delivered (or on error).
     busyRef.current = true;
     setLoading(true);
     setOrbMode("thinking");
@@ -728,9 +770,6 @@ export default function App() {
       setTimeout(() => {
         setOrbMode("idle");
         busyRef.current = false;
-        // Close the panel slot now — bubbles are fading on their own TTL
-        // and will keep showPanel true until they're gone, but winW is
-        // already back to ORB_D so the window shrinks immediately here.
         setPanelOpen(false);
       }, 3000);
     } catch (err) {
@@ -755,7 +794,7 @@ export default function App() {
     setLoading(false);
   }, [input, loading, chat.history, apiKey, addBubble, scheduleThinkWith]);
 
-  // ── Orb click handler ────────────────────────────────────────────────────────
+  // ── Orb click handler ──────────────────────────────────────────────────────
   const handleClick = useCallback(() => {
     if (wasDrag()) return;
 
@@ -781,10 +820,10 @@ export default function App() {
     }
   }, [wasDrag, alertMsg, uiMode]);
 
-  // ── Clear history ────────────────────────────────────────────────────────────
+  // ── Clear history ──────────────────────────────────────────────────────────
   const clearHistory = useCallback(() => { dispatch({ type: "CLEAR" }); }, []);
 
-  // ── Render ───────────────────────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────────────────────
   if (!apiKey) return <SetupScreen onSave={(k) => { db.set("aegis_apikey", k); setApiKey(k); }} />;
 
   if (uiMode === "history") return (
@@ -803,8 +842,6 @@ export default function App() {
     orbMode === "thinking"   ? "#00c8ff" :
     orbMode === "error"      ? "#f87171" :
                                "rgba(0,130,255,0.8)";
-
-  const panelLeft = panelSide === "left";
 
   return (
     <div style={{
@@ -857,6 +894,7 @@ export default function App() {
             paddingLeft: panelLeft ? 0 : 6,
             paddingRight: panelLeft ? 6 : 0,
             alignSelf: "center",
+            visibility: panelVisibleRef.current ? "visible" : "hidden",
           }}
         >
           {alertMsg && (
