@@ -1,0 +1,50 @@
+{
+  "name": "aegis-desktop",
+  "version": "1.0.0",
+  "description": "AEGIS — Autonomous Eternal Game Intelligence System",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
+    "build": "vite build && electron-builder",
+    "preview": "vite build && cross-env NODE_ENV=production electron ."
+  },
+  "build": {
+    "appId": "com.aegis.gamebrain",
+    "productName": "AEGIS",
+    "directories": { "output": "release" },
+    "files": ["dist/**/*", "electron/**/*", "assets/**/*"],
+    "mac": {
+      "category": "public.app-category.games",
+      "target": "dmg",
+      "icon": "assets/icon.icns"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "keywords": ["aegis", "game-ai", "electron"],
+  "author": "AEGIS",
+  "license": "MIT",
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "vite": "^5.4.11",
+    "wait-on": "^8.0.1"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}
