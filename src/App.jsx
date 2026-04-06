@@ -119,8 +119,8 @@ async function callGemini(apiKey, history, maxTokens = 350, signal) {
   return text;
 }
 
-// ─── ORB ──────────────────────────────────────────────────────────────────────
-function Orb({ mode, size }) {
+// ─── ROBOT HEAD ───────────────────────────────────────────────────────────────
+function RobotHead({ mode, size }) {
   const canvasRef = useRef(null);
   const rafRef    = useRef(null);
   const modeRef   = useRef(mode);
@@ -134,102 +134,499 @@ function Orb({ mode, size }) {
     canvas.height = size * dpr;
     const ctx = canvas.getContext("2d");
     ctx.scale(dpr, dpr);
-    const cx = size / 2, cy = size / 2;
 
-    const pts = Array.from({ length: 60 }, () => ({
-      a:  Math.random() * Math.PI * 2,
-      r:  size * 0.22 + Math.random() * size * 0.18,
-      sp: (Math.random() - 0.5) * 0.007,
-      sz: Math.random() * 1.8 + 0.3,
-      al: Math.random() * 0.55 + 0.12,
-      dr: (Math.random() - 0.5) * 0.002,
-    }));
+    // ── Blink state ──
+    let blinkTimer   = 2 + Math.random() * 3;   // seconds until next blink
+    let blinkElapsed = 0;
+    let blinking     = false;
+    const BLINK_DUR  = 0.12;                     // full blink cycle (open→shut→open)
 
-    const arcs = [
-      { r: size * 0.28, sp: 0.005,  gap: 0.28, w: 1.0,  d:  1 },
-      { r: size * 0.36, sp: 0.003,  gap: 0.45, w: 0.75, d: -1 },
-      { r: size * 0.43, sp: 0.002,  gap: 0.58, w: 0.6,  d:  1 },
-      { r: size * 0.49, sp: 0.0015, gap: 0.70, w: 0.45, d: -1 },
-    ];
+    // ── Mouth phoneme state ──
+    let mouthOpen    = 0;   // 0–1 current open amount
+    let mouthTarget  = 0;   // target for smooth lerp
+    let phonemeTimer = 0;
+    const PHONEME_RATE = 0.07;  // seconds between target changes when speaking
+
+    // ── Pupil wander ──
+    let pupilX = 0, pupilY = 0;
+    let pupilTX = 0, pupilTY = 0;
+    let pupilTimer = 0;
 
     let t = 0;
+
     function frame() {
-      t += 0.016;
+      const dt = 0.016;
+      t += dt;
+
       const m = modeRef.current;
+
+      // ── Accent color per mode ──
       const C =
         m === "thinking"   ? [0, 200, 255] :
         m === "speaking"   ? [0, 255, 180] :
         m === "autonomous" ? [180, 80, 255] :
         m === "error"      ? [255, 80, 80]  :
-                             [80, 120, 255];
+                             [60, 140, 255];
       const [r, g, b] = C;
-      const rgb     = `${r},${g},${b}`;
-      const pulse   = Math.sin(t * (m === "thinking" ? 5 : m === "speaking" ? 6 : m === "autonomous" ? 3 : 1.6)) * 0.5 + 0.5;
-      const breathe = Math.sin(t * 0.9) * 0.1 + 0.9;
+      const rgb   = `${r},${g},${b}`;
+      const pulse = Math.sin(t * (m === "thinking" ? 5 : m === "speaking" ? 7 : 2)) * 0.5 + 0.5;
 
       ctx.clearRect(0, 0, size, size);
 
-      const og = ctx.createRadialGradient(cx, cy, size * 0.04, cx, cy, size * 0.5);
-      og.addColorStop(0,   `rgba(${rgb},${0.12 * breathe})`);
-      og.addColorStop(0.5, `rgba(${rgb},${0.04 * breathe})`);
-      og.addColorStop(1,   `rgba(${rgb},0)`);
-      ctx.beginPath(); ctx.arc(cx, cy, size * 0.5, 0, Math.PI * 2);
-      ctx.fillStyle = og; ctx.fill();
+      const cx  = size / 2;
+      const cy  = size / 2 - size * 0.02;
 
-      arcs.forEach((arc, i) => {
-        const rot = t * arc.sp * arc.d + i * 1.2;
-        const len = Math.PI * 2 * (1 - arc.gap);
-        ctx.beginPath(); ctx.arc(cx, cy, arc.r, rot, rot + len);
-        ctx.strokeStyle = `rgba(${rgb},${(0.16 + pulse * 0.12) * breathe})`;
-        ctx.lineWidth = arc.w; ctx.lineCap = "round"; ctx.stroke();
+      // ── Head proportions ──
+      const HW  = size * 0.62;
+      const HH  = size * 0.68;
+      const HX  = cx - HW / 2;
+      const HY  = cy - HH / 2;
+      const HBR = size * 0.07;  // head corner radius
+
+      // ── Ambient glow around head ──
+      const gCtx = ctx.createRadialGradient(cx, cy, HW * 0.1, cx, cy, HW * 0.82);
+      gCtx.addColorStop(0,   `rgba(${rgb},0.07)`);
+      gCtx.addColorStop(0.6, `rgba(${rgb},0.03)`);
+      gCtx.addColorStop(1,   `rgba(${rgb},0)`);
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, HW * 0.78, HH * 0.78, 0, 0, Math.PI * 2);
+      ctx.fillStyle = gCtx;
+      ctx.fill();
+
+      // ── Neck ──
+      const neckW = HW * 0.28;
+      const neckH = size * 0.06;
+      ctx.beginPath();
+      ctx.rect(cx - neckW / 2, HY + HH - 1, neckW, neckH);
+      ctx.fillStyle = `rgba(6,14,38,0.95)`;
+      ctx.fill();
+      ctx.strokeStyle = `rgba(${rgb},0.35)`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      // Neck detail lines
+      for (let i = 1; i < 3; i++) {
+        const lx = cx - neckW / 2 + (neckW / 3) * i;
         ctx.beginPath();
-        ctx.arc(cx + Math.cos(rot + len) * arc.r, cy + Math.sin(rot + len) * arc.r, 1.8, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(${rgb},${0.7 * breathe})`; ctx.fill();
-      });
-
-      pts.forEach((p) => {
-        p.a += p.sp * (m === "thinking" ? 2.5 : m === "autonomous" ? 1.8 : 1);
-        p.r += p.dr;
-        if (p.r > size * 0.45 || p.r < size * 0.2) p.dr *= -1;
-        ctx.beginPath();
-        ctx.arc(cx + Math.cos(p.a) * p.r, cy + Math.sin(p.a) * p.r, p.sz, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(${rgb},${p.al * breathe})`; ctx.fill();
-      });
-
-      if (m === "thinking" || m === "autonomous") {
-        const sa = t * (m === "thinking" ? 3.5 : 2);
-        const sg = ctx.createLinearGradient(cx, cy, cx + Math.cos(sa) * size * 0.47, cy + Math.sin(sa) * size * 0.47);
-        sg.addColorStop(0, `rgba(${rgb},0.5)`); sg.addColorStop(1, `rgba(${rgb},0)`);
-        ctx.beginPath(); ctx.moveTo(cx, cy);
-        ctx.lineTo(cx + Math.cos(sa) * size * 0.47, cy + Math.sin(sa) * size * 0.47);
-        ctx.strokeStyle = sg; ctx.lineWidth = 1.5; ctx.lineCap = "round"; ctx.stroke();
+        ctx.moveTo(lx, HY + HH);
+        ctx.lineTo(lx, HY + HH + neckH);
+        ctx.strokeStyle = `rgba(${rgb},0.18)`;
+        ctx.lineWidth = 0.7;
+        ctx.stroke();
       }
 
+      // ── Ears ──
+      const earW = size * 0.055;
+      const earH = size * 0.18;
+      const earY = cy - earH / 2 + size * 0.02;
+      for (const ex of [HX - earW, HX + HW]) {
+        ctx.beginPath();
+        ctx.roundRect(ex, earY, earW, earH, 2);
+        ctx.fillStyle = `rgba(6,14,38,0.95)`;
+        ctx.fill();
+        ctx.strokeStyle = `rgba(${rgb},0.38)`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        // Ear detail: tiny LED
+        const ledY2 = earY + earH * 0.3;
+        ctx.beginPath();
+        ctx.arc(ex + earW / 2, ledY2, size * 0.012, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${rgb},${0.4 + pulse * 0.5})`;
+        ctx.fill();
+      }
+
+      // ── Antenna ──
+      const antH  = size * 0.1;
+      const antBY = HY;
+      ctx.beginPath();
+      ctx.moveTo(cx, antBY);
+      ctx.lineTo(cx, antBY - antH);
+      ctx.strokeStyle = `rgba(${rgb},0.55)`;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      // Antenna ball
+      const antR = size * 0.028;
+      const antBG = ctx.createRadialGradient(cx - antR * 0.3, antBY - antH - antR * 0.3, 0, cx, antBY - antH, antR * 1.6);
+      antBG.addColorStop(0,   `rgba(255,255,255,${0.8 + pulse * 0.2})`);
+      antBG.addColorStop(0.4, `rgba(${rgb},0.9)`);
+      antBG.addColorStop(1,   `rgba(${rgb},0)`);
+      ctx.beginPath();
+      ctx.arc(cx, antBY - antH, antR, 0, Math.PI * 2);
+      ctx.fillStyle = antBG;
+      ctx.fill();
+
+      // ── Main head body ──
+      ctx.beginPath();
+      ctx.roundRect(HX, HY, HW, HH, HBR);
+      ctx.fillStyle = `rgba(6,14,38,0.96)`;
+      ctx.fill();
+      ctx.strokeStyle = `rgba(${rgb},${0.55 + pulse * 0.15})`;
+      ctx.lineWidth   = 1.5;
+      ctx.stroke();
+
+      // Top accent bar
+      ctx.beginPath();
+      ctx.moveTo(HX + HBR, HY + 1);
+      ctx.lineTo(HX + HW - HBR, HY + 1);
+      const barG = ctx.createLinearGradient(HX, 0, HX + HW, 0);
+      barG.addColorStop(0,   `rgba(${rgb},0)`);
+      barG.addColorStop(0.5, `rgba(${rgb},0.6)`);
+      barG.addColorStop(1,   `rgba(${rgb},0)`);
+      ctx.strokeStyle = barG;
+      ctx.lineWidth   = 1.2;
+      ctx.stroke();
+
+      // ── Corner bracket accents ──
+      const brkSize = size * 0.055;
+      const brkOff  = size * 0.015;
+      const brackets = [
+        [HX + brkOff,          HY + brkOff,          1,  1],
+        [HX + HW - brkOff,     HY + brkOff,          -1, 1],
+        [HX + brkOff,          HY + HH - brkOff,     1,  -1],
+        [HX + HW - brkOff,     HY + HH - brkOff,     -1, -1],
+      ];
+      brackets.forEach(([bx, by, sx, sy]) => {
+        ctx.beginPath();
+        ctx.moveTo(bx + sx * brkSize, by);
+        ctx.lineTo(bx, by);
+        ctx.lineTo(bx, by + sy * brkSize);
+        ctx.strokeStyle = `rgba(${rgb},0.6)`;
+        ctx.lineWidth   = 1.2;
+        ctx.lineCap = "square";
+        ctx.stroke();
+        ctx.lineCap = "butt";
+      });
+
+      // ── Forehead panel ──
+      const fpW = HW * 0.55;
+      const fpH = size * 0.055;
+      const fpX = cx - fpW / 2;
+      const fpY = HY + size * 0.055;
+      ctx.beginPath();
+      ctx.roundRect(fpX, fpY, fpW, fpH, 2);
+      ctx.fillStyle = `rgba(0,8,28,0.8)`;
+      ctx.fill();
+      ctx.strokeStyle = `rgba(${rgb},0.28)`;
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+      // Forehead scan line (thinking)
+      if (m === "thinking" || m === "autonomous") {
+        const scanX = fpX + ((t * 60) % fpW);
+        ctx.beginPath();
+        ctx.moveTo(scanX, fpY);
+        ctx.lineTo(scanX, fpY + fpH);
+        ctx.strokeStyle = `rgba(${rgb},0.55)`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      // Forehead mini-LEDs
+      for (let i = 0; i < 5; i++) {
+        const ledX = fpX + fpW * 0.1 + i * (fpW * 0.8 / 4);
+        const ledOn = m === "speaking"
+          ? Math.floor(t * 8 + i) % 2 === 0
+          : m === "thinking"
+          ? i === Math.floor((t * 4) % 5)
+          : i < 2;
+        ctx.beginPath();
+        ctx.arc(ledX, fpY + fpH / 2, size * 0.012, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${rgb},${ledOn ? 0.9 : 0.15})`;
+        ctx.fill();
+      }
+
+      // ── EYES ──────────────────────────────────────────────────────────────
+      // Blink logic
+      if (!blinking) {
+        blinkTimer -= dt;
+        if (blinkTimer <= 0) {
+          blinking = true;
+          blinkElapsed = 0;
+        }
+      } else {
+        blinkElapsed += dt;
+        if (blinkElapsed >= BLINK_DUR) {
+          blinking = false;
+          blinkTimer = 2.2 + Math.random() * 3.8;
+        }
+      }
+      // blinkProgress: 0 = fully open, 1 = fully closed
+      const blinkProg = blinking
+        ? Math.sin((blinkElapsed / BLINK_DUR) * Math.PI)
+        : 0;
+      const eyeOpenness = 1 - blinkProg;
+
+      // Pupil wander
+      pupilTimer -= dt;
+      if (pupilTimer <= 0) {
+        pupilTX = (Math.random() - 0.5) * 0.45;
+        pupilTY = (Math.random() - 0.5) * 0.3;
+        pupilTimer = 1.2 + Math.random() * 2;
+      }
+      pupilX += (pupilTX - pupilX) * 0.06;
+      pupilY += (pupilTY - pupilY) * 0.06;
+
+      const eyeEY  = HY + HH * 0.38;
+      const eyeW   = HW * 0.26;
+      const eyeH   = HH * 0.22;
+      const eyeGap = HW * 0.13;
+      const eyePositions = [
+        cx - eyeGap - eyeW / 2,
+        cx + eyeGap - eyeW / 2,
+      ];
+
+      eyePositions.forEach((ex, idx) => {
+        const eyeCX = ex + eyeW / 2;
+        const eyeCY = eyeEY;
+
+        // Eye socket background
+        ctx.beginPath();
+        ctx.roundRect(ex, eyeEY - eyeH / 2, eyeW, eyeH, size * 0.025);
+        ctx.fillStyle = `rgba(0,4,18,0.95)`;
+        ctx.fill();
+        ctx.strokeStyle = `rgba(${rgb},0.5)`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        if (eyeOpenness > 0.02) {
+          // Iris glow
+          const irisR = Math.min(eyeW, eyeH) * 0.33 * eyeOpenness;
+          const px    = eyeCX + pupilX * eyeW * 0.25;
+          const py    = eyeCY + pupilY * eyeH * 0.25;
+
+          const irisG = ctx.createRadialGradient(px - irisR * 0.2, py - irisR * 0.2, 0, px, py, irisR * 1.1);
+          irisG.addColorStop(0,   `rgba(255,255,255,0.95)`);
+          irisG.addColorStop(0.25, `rgba(${rgb},1)`);
+          irisG.addColorStop(0.7,  `rgba(${rgb},0.5)`);
+          irisG.addColorStop(1,    `rgba(${rgb},0.05)`);
+
+          ctx.save();
+          ctx.beginPath();
+          ctx.roundRect(ex + 1, eyeEY - eyeH / 2 + 1, eyeW - 2, (eyeH - 2) * eyeOpenness, size * 0.02);
+          ctx.clip();
+
+          ctx.beginPath();
+          ctx.ellipse(px, py, irisR, irisR * eyeOpenness, 0, 0, Math.PI * 2);
+          ctx.fillStyle = irisG;
+          ctx.fill();
+
+          // Pupil
+          const pupR = irisR * 0.38;
+          ctx.beginPath();
+          ctx.ellipse(px, py, pupR, pupR * eyeOpenness, 0, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(0,0,0,0.92)`;
+          ctx.fill();
+
+          // Highlight sparkle
+          ctx.beginPath();
+          ctx.arc(px - irisR * 0.22, py - irisR * 0.22 * eyeOpenness, irisR * 0.11, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255,255,255,0.88)`;
+          ctx.fill();
+
+          ctx.restore();
+
+          // Scan line effect (thinking)
+          if (m === "thinking") {
+            const scanYE = eyeEY - eyeH / 2 + ((t * 45) % (eyeH * eyeOpenness));
+            ctx.save();
+            ctx.beginPath();
+            ctx.roundRect(ex + 1, eyeEY - eyeH / 2 + 1, eyeW - 2, eyeH * eyeOpenness - 2, size * 0.02);
+            ctx.clip();
+            ctx.beginPath();
+            ctx.moveTo(ex, scanYE);
+            ctx.lineTo(ex + eyeW, scanYE);
+            ctx.strokeStyle = `rgba(${rgb},0.28)`;
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+            ctx.restore();
+          }
+        }
+
+        // Eyelid — slides from top and bottom to meet in center
+        if (blinkProg > 0) {
+          const lidH = (eyeH / 2) * blinkProg;
+          // Top lid
+          ctx.beginPath();
+          ctx.roundRect(ex, eyeEY - eyeH / 2, eyeW, lidH + 1, [size * 0.025, size * 0.025, 0, 0]);
+          ctx.fillStyle = `rgba(6,14,38,0.99)`;
+          ctx.fill();
+          // Bottom lid
+          ctx.beginPath();
+          ctx.roundRect(ex, eyeEY + eyeH / 2 - lidH - 1, eyeW, lidH + 1, [0, 0, size * 0.025, size * 0.025]);
+          ctx.fillStyle = `rgba(6,14,38,0.99)`;
+          ctx.fill();
+          // Lid edge glow
+          ctx.beginPath();
+          ctx.moveTo(ex + 2, eyeEY - eyeH / 2 + lidH);
+          ctx.lineTo(ex + eyeW - 2, eyeEY - eyeH / 2 + lidH);
+          ctx.strokeStyle = `rgba(${rgb},0.5)`;
+          ctx.lineWidth = 0.8;
+          ctx.stroke();
+        }
+
+        // Error: red-X overlay on eyes
+        if (m === "error") {
+          ctx.save();
+          ctx.beginPath();
+          ctx.roundRect(ex, eyeEY - eyeH / 2, eyeW, eyeH, size * 0.025);
+          ctx.clip();
+          ctx.strokeStyle = `rgba(255,80,80,0.7)`;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(ex + 3, eyeEY - eyeH / 2 + 3);
+          ctx.lineTo(ex + eyeW - 3, eyeEY + eyeH / 2 - 3);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(ex + eyeW - 3, eyeEY - eyeH / 2 + 3);
+          ctx.lineTo(ex + 3, eyeEY + eyeH / 2 - 3);
+          ctx.stroke();
+          ctx.restore();
+        }
+      });
+
+      // ── NOSE (tiny indicator) ──
+      const noseY = HY + HH * 0.585;
+      ctx.beginPath();
+      ctx.moveTo(cx - size * 0.02, noseY + size * 0.015);
+      ctx.lineTo(cx, noseY);
+      ctx.lineTo(cx + size * 0.02, noseY + size * 0.015);
+      ctx.strokeStyle = `rgba(${rgb},0.22)`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // ── MOUTH ─────────────────────────────────────────────────────────────
+      const mouthW = HW * 0.68;
+      const mouthH = HH * 0.14;
+      const mouthX = cx - mouthW / 2;
+      const mouthY = HY + HH * 0.67;
+      const mouthBR = size * 0.018;
+
+      // Mouth housing
+      ctx.beginPath();
+      ctx.roundRect(mouthX, mouthY, mouthW, mouthH, mouthBR);
+      ctx.fillStyle = `rgba(0,4,18,0.9)`;
+      ctx.fill();
+      ctx.strokeStyle = `rgba(${rgb},0.4)`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Mouth content
       if (m === "speaking") {
-        for (let i = 0; i < 3; i++) {
-          const rr = size * 0.18 + ((t * 50 + i * 34) % (size * 0.36));
-          const ro = Math.max(0, 1 - rr / (size * 0.36));
-          ctx.beginPath(); ctx.arc(cx, cy, rr, 0, Math.PI * 2);
-          ctx.strokeStyle = `rgba(${rgb},${ro * 0.32})`; ctx.lineWidth = 1.2; ctx.stroke();
+        // Phoneme timing: smoothly randomize open amount
+        phonemeTimer -= dt;
+        if (phonemeTimer <= 0) {
+          mouthTarget = 0.2 + Math.random() * 0.8;
+          phonemeTimer = PHONEME_RATE + Math.random() * 0.05;
+        }
+        mouthOpen += (mouthTarget - mouthOpen) * 0.22;
+
+        // Open gap (inner darkness)
+        const gapH = mouthH * 0.82 * mouthOpen;
+        const gapY = mouthY + (mouthH - gapH) / 2;
+        ctx.beginPath();
+        ctx.roundRect(mouthX + 2, gapY, mouthW - 4, Math.max(0, gapH), mouthBR * 0.5);
+        ctx.fillStyle = `rgba(0,0,0,0.85)`;
+        ctx.fill();
+
+        // Animated LED bar-graph teeth
+        const bars = 9;
+        const pad  = size * 0.022;
+        const totalPad = pad * 2 + (bars - 1) * 1.5;
+        const barW = (mouthW - totalPad) / bars;
+        for (let i = 0; i < bars; i++) {
+          // Each bar has its own phase, giving a natural speech waveform
+          const barAmp = (Math.sin(t * 14 + i * 0.9) * 0.5 + 0.5) *
+                         (Math.sin(t * 7  + i * 1.7) * 0.3 + 0.7) *
+                         mouthOpen;
+          const bh = mouthH * 0.78 * barAmp;
+          const bx = mouthX + pad + i * (barW + 1.5);
+          const by = mouthY + mouthH - bh - size * 0.008;
+          if (bh < 0.5) continue;
+          // Bar gradient: bright at top
+          const barG = ctx.createLinearGradient(bx, by, bx, by + bh);
+          barG.addColorStop(0,   `rgba(255,255,255,${0.7 * barAmp})`);
+          barG.addColorStop(0.3, `rgba(${rgb},${0.9 * barAmp})`);
+          barG.addColorStop(1,   `rgba(${rgb},${0.3 * barAmp})`);
+          ctx.beginPath();
+          ctx.roundRect(bx, by, barW, bh, 1);
+          ctx.fillStyle = barG;
+          ctx.fill();
+        }
+      } else if (m === "thinking") {
+        // Scrolling dot-dot-dot
+        mouthOpen += (0 - mouthOpen) * 0.12;
+        const dots = 5;
+        const dotR = size * 0.013;
+        for (let i = 0; i < dots; i++) {
+          const phase = (t * 1.8 + i * (1 / dots)) % 1;
+          const alpha = Math.sin(phase * Math.PI) * 0.75 + 0.05;
+          const dxOff = mouthW * (0.12 + i * 0.17);
+          ctx.beginPath();
+          ctx.arc(mouthX + dxOff, mouthY + mouthH / 2, dotR, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${rgb},${alpha})`;
+          ctx.fill();
+        }
+      } else if (m === "autonomous") {
+        // Slow oscilloscope wave
+        mouthOpen += (0 - mouthOpen) * 0.1;
+        ctx.beginPath();
+        const wavePts = 28;
+        for (let i = 0; i <= wavePts; i++) {
+          const wx = mouthX + 4 + (mouthW - 8) * (i / wavePts);
+          const wy = mouthY + mouthH / 2 +
+                     Math.sin(t * 2.2 + i * 0.55) * mouthH * 0.32 +
+                     Math.sin(t * 1.1 + i * 0.22) * mouthH * 0.14;
+          i === 0 ? ctx.moveTo(wx, wy) : ctx.lineTo(wx, wy);
+        }
+        ctx.strokeStyle = `rgba(${rgb},0.65)`;
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+      } else if (m === "error") {
+        // Flat frown
+        mouthOpen += (0 - mouthOpen) * 0.15;
+        ctx.beginPath();
+        ctx.moveTo(mouthX + mouthW * 0.12, mouthY + mouthH * 0.38);
+        ctx.quadraticCurveTo(cx, mouthY + mouthH * 0.88, mouthX + mouthW * 0.88, mouthY + mouthH * 0.38);
+        ctx.strokeStyle = `rgba(255,80,80,0.75)`;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      } else {
+        // Idle: gentle smile
+        mouthOpen += (0 - mouthOpen) * 0.1;
+        ctx.beginPath();
+        ctx.moveTo(mouthX + mouthW * 0.12, mouthY + mouthH * 0.62);
+        ctx.quadraticCurveTo(cx, mouthY + mouthH * 0.24, mouthX + mouthW * 0.88, mouthY + mouthH * 0.62);
+        ctx.strokeStyle = `rgba(${rgb},0.38)`;
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      }
+
+      // ── Bottom status LEDs ──
+      const ledBarY = HY + HH - size * 0.055;
+      const ledCount = 5;
+      const ledSpacing = HW * 0.14;
+      const ledStartX  = cx - ((ledCount - 1) * ledSpacing) / 2;
+      for (let i = 0; i < ledCount; i++) {
+        const lx     = ledStartX + i * ledSpacing;
+        let   litAmt = 0.15;
+        if (m === "speaking")   litAmt = 0.15 + Math.abs(Math.sin(t * 9 + i * 1.3)) * 0.75;
+        else if (m === "thinking")   litAmt = i === Math.floor((t * 3.5) % ledCount) ? 0.9 : 0.12;
+        else if (m === "autonomous") litAmt = 0.15 + Math.sin(t * 1.4 + i * 0.9) * 0.35 + 0.35;
+        else if (m === "error")      litAmt = Math.floor(t * 4) % 2 === 0 ? 0.85 : 0.1;
+        else litAmt = 0.12 + (i < 2 ? 0.2 : 0);
+
+        ctx.beginPath();
+        ctx.arc(lx, ledBarY, size * 0.013, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${rgb},${litAmt})`;
+        ctx.fill();
+        if (litAmt > 0.5) {
+          ctx.beginPath();
+          ctx.arc(lx, ledBarY, size * 0.02, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${rgb},0.1)`;
+          ctx.fill();
         }
       }
 
-      const cs = (size * 0.2 + pulse * 3.5) * breathe;
-      const cg = ctx.createRadialGradient(cx - cs * 0.2, cy - cs * 0.2, 0, cx, cy, cs);
-      cg.addColorStop(0,   `rgba(${rgb},${0.7 + pulse * 0.22})`);
-      cg.addColorStop(0.4, `rgba(${rgb},${0.35 + pulse * 0.1})`);
-      cg.addColorStop(0.8, `rgba(${rgb},0.08)`);
-      cg.addColorStop(1,   `rgba(${rgb},0)`);
-      ctx.beginPath(); ctx.arc(cx, cy, cs, 0, Math.PI * 2); ctx.fillStyle = cg; ctx.fill();
-
-      const ic = ctx.createRadialGradient(cx - 5, cy - 5, 0, cx, cy, size * 0.075);
-      ic.addColorStop(0,   `rgba(255,255,255,${0.9 + pulse * 0.1})`);
-      ic.addColorStop(0.5, `rgba(${rgb},0.7)`);
-      ic.addColorStop(1,   `rgba(${rgb},0)`);
-      ctx.beginPath(); ctx.arc(cx, cy, size * 0.075, 0, Math.PI * 2); ctx.fillStyle = ic; ctx.fill();
-
       rafRef.current = requestAnimationFrame(frame);
     }
+
     rafRef.current = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(rafRef.current);
   }, [size]);
@@ -283,10 +680,8 @@ function Bubble({ text, role, fading, panelLeft }) {
 
   return (
     <div style={{
-      position: "relative",
-      padding: "10px 14px",
-      background: bg,
-      border: `1px solid ${accent}`,
+      position: "relative", padding: "10px 14px",
+      background: bg, border: `1px solid ${accent}`,
       borderRadius: isUser ? "8px 8px 2px 8px" : "2px 8px 8px 8px",
       backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
       fontSize: 12, color: "rgba(220,235,255,0.95)",
@@ -421,7 +816,7 @@ function SetupScreen({ onSave }) {
     >
       <Corners color="rgba(0,200,255,0.5)" size={12} />
       <div style={{ position: "absolute", top: 0, left: 20, right: 20, height: 1, background: "linear-gradient(90deg,transparent,rgba(0,200,255,0.4),transparent)" }} />
-      <Orb mode="idle" size={100} />
+      <RobotHead mode="idle" size={100} />
       <div style={{ textAlign: "center" }}>
         <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: "0.4em", color: "rgba(0,210,255,0.95)", textShadow: "0 0 20px rgba(0,200,255,0.5)" }}>AEGIS</div>
         <div style={{ fontSize: 8, color: "rgba(0,200,255,0.3)", letterSpacing: "0.25em", marginTop: 4 }}>GAME BRAIN · INITIALIZATION</div>
@@ -582,79 +977,47 @@ export default function App() {
   const inputRef   = useRef(null);
   const abortRef   = useRef(null);
 
-  // Layout refs & state
-  //
-  // panelSide is React STATE so flexDirection updates in the same render as
-  // setPanelVisible(true) — no frame where the orb is on the wrong side.
   const [panelSide, setPanelSide]       = useState("right");
-  // Mirror ref: lets applyBoundsCore read the current side synchronously
-  // inside an async function without a stale-closure problem.
   const panelSideRef                    = useRef("right");
   const physicallyExpandedRef           = useRef(false);
-  // Serialisation guard — prevents two setBounds calls from overlapping.
   const boundsInFlightRef               = useRef(null);
   const pendingBoundsRef                = useRef(null);
-  // Real React state so hide/show is guaranteed to paint before/after the
-  // Electron window move.
   const [panelVisible, setPanelVisible] = useState(true);
 
-  // Derived layout values
   const winW      = (panelOpen || !!alertMsg || bubbles.length > 0) ? ORB_D + 6 + PANEL_W : ORB_D;
   const winH      = ORB_D;
   const showPanel = panelOpen || !!alertMsg || bubbles.length > 0;
-  const panelLeft = panelSide === "left";   // reads React state, not a ref
+  const panelLeft = panelSide === "left";
 
-  // applyBoundsCore — the actual async resize logic
   const applyBoundsCore = useCallback(async (newW, newH) => {
     if (uiMode === "history" || !apiKey) return;
-
-    // Capture both pieces of physical truth synchronously before any await.
     const wasExpanded = physicallyExpandedRef.current;
     const currentSide = panelSideRef.current;
-
-    // Hide panel — React will flush this setState before reaching the await.
     setPanelVisible(false);
-
     const currentWinX = window.screenX;
     const currentWinY = window.screenY;
     const currentW    = window.outerWidth;
-
-    // When the panel is on the LEFT and the window is wide, the orb lives at
-    // the FAR-RIGHT edge of the Electron window, not at screenX.
     const orbX = (currentSide === "left" && wasExpanded)
       ? currentWinX + currentW - ORB_D
       : currentWinX;
-
     const chosenSide = await window.electronAPI?.setBounds?.(orbX, currentWinY, newW, newH, ORB_D, PANEL_W);
     if (!chosenSide) window.electronAPI?.resize?.(newW, newH);
-
     const newSide = chosenSide ?? currentSide;
-    // Update mirror ref first (sync, used by the next orbX calculation).
     panelSideRef.current = newSide;
     physicallyExpandedRef.current = newW > ORB_D;
-
-    // One rAF so Electron's reposition is composited before we repaint.
     await new Promise((r) => requestAnimationFrame(r));
-
-    // Both state updates land in the same React render batch:
-    //   panelSide    => flips flexDirection to the correct side
-    //   panelVisible => makes the panel visible
-    // This ensures the orb is NEVER seen on the wrong side of the container.
     setPanelSide(newSide);
     setPanelVisible(true);
   }, [uiMode, apiKey]);
 
   const applyBounds = useCallback((newW, newH) => {
     if (boundsInFlightRef.current) {
-      // Another call is running — park the latest request and return.
       pendingBoundsRef.current = { newW, newH };
       return;
     }
-
     const run = async (w, h) => {
       boundsInFlightRef.current = applyBoundsCore(w, h).finally(async () => {
         boundsInFlightRef.current = null;
-        // If a newer request arrived while we were busy, run it now.
         if (pendingBoundsRef.current) {
           const { newW: pw, newH: ph } = pendingBoundsRef.current;
           pendingBoundsRef.current = null;
@@ -665,19 +1028,15 @@ export default function App() {
     run(newW, newH);
   }, [applyBoundsCore]);
 
-  // ── Trigger resize whenever target window size changes ────────────────────
   useEffect(() => {
     if (uiMode === "history" || !apiKey) return;
     applyBounds(winW, winH);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [winW, winH, uiMode, apiKey]);
 
-  // ── handleDragEnd ──────────────────────────────────────────────────────────
-  // Re-use applyBounds after drag so the in-flight guard and side-ref stay consistent.
   const handleDragEnd = useCallback(() => {
     applyBounds(winW, winH);
-  // winW/winH are stable primitives at drag-end time; applyBounds is memoised.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [applyBounds, winW, winH]);
 
   const { onMouseDown: dragStart, wasDrag } = useDrag(handleDragEnd);
@@ -686,7 +1045,6 @@ export default function App() {
     if (uiMode === "input") setTimeout(() => inputRef.current?.focus(), 80);
   }, [uiMode]);
 
-  // ── Load persisted chat on mount ──────────────────────────────────────────
   useEffect(() => {
     if (!apiKey) return;
     const saved = db.get("aegis_chat");
@@ -701,12 +1059,10 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey]);
 
-  // ── Alert appearing opens the panel ───────────────────────────────────────
   useEffect(() => {
     if (alertMsg) setPanelOpen(true);
   }, [alertMsg]);
 
-  // ── Bubble helpers ─────────────────────────────────────────────────────────
   const addBubble = useCallback((text, role) => {
     const id = ++bidRef.current;
     setBubbles((prev) => [...prev.slice(-2), { id, text, role, fading: false }]);
@@ -717,7 +1073,6 @@ export default function App() {
     }, ttl);
   }, []);
 
-  // ── Autonomous thinking ────────────────────────────────────────────────────
   const autonomousThink = useCallback(async (currentHistory) => {
     if (busyRef.current) { scheduleThinkWith(currentHistory); return; }
     busyRef.current = true;
@@ -752,11 +1107,9 @@ export default function App() {
     thinkTimer.current = setTimeout(() => autonomousThink([]), THINK_INTERVAL);
   }
 
-  // ── Send message ───────────────────────────────────────────────────────────
   const send = useCallback(async () => {
     const text = input.trim();
     if (!text || loading || busyRef.current) return;
-
     setInput("");
     setUiMode("orb");
     busyRef.current = true;
@@ -764,22 +1117,18 @@ export default function App() {
     setOrbMode("thinking");
     clearTimeout(thinkTimer.current);
     addBubble(text, "user");
-
     const msgId = Date.now();
     dispatch({ type: "USER_MSG", id: msgId, text });
     const nextHistory = [...chat.history, { role: "user", content: text }];
-
     try {
       const controller = new AbortController();
       abortRef.current = controller;
       const reply = await callGemini(apiKey, nextHistory, 350, controller.signal);
-
       dispatch({ type: "AEGIS_MSG", id: Date.now(), text: reply });
       setRetryCount(0);
       setOrbMode("speaking");
       addBubble(reply, "aegis");
       scheduleThinkWith([...nextHistory, { role: "assistant", content: reply }]);
-
       setTimeout(() => {
         setOrbMode("idle");
         busyRef.current = false;
@@ -803,16 +1152,12 @@ export default function App() {
         scheduleThinkWith(nextHistory);
       }, isQuota ? 60000 : 3000);
     }
-
     setLoading(false);
   }, [input, loading, chat.history, apiKey, addBubble, scheduleThinkWith]);
 
-  // ── Orb click handler ──────────────────────────────────────────────────────
   const handleClick = useCallback(() => {
     if (wasDrag()) return;
-
     if (clickTimer.current) {
-      // Double-click → history view
       clearTimeout(clickTimer.current);
       clickTimer.current = null;
       setPanelOpen(false);
@@ -833,10 +1178,8 @@ export default function App() {
     }
   }, [wasDrag, alertMsg, uiMode]);
 
-  // ── Clear history ──────────────────────────────────────────────────────────
   const clearHistory = useCallback(() => { dispatch({ type: "CLEAR" }); }, []);
 
-  // ── Render ─────────────────────────────────────────────────────────────────
   if (!apiKey) return <SetupScreen onSave={(k) => { db.set("aegis_apikey", k); setApiKey(k); }} />;
 
   if (uiMode === "history") return (
@@ -865,7 +1208,7 @@ export default function App() {
       background: "transparent", overflow: "hidden",
       fontFamily: "'Courier New', monospace",
     }}>
-      {/* ── ORB ── */}
+      {/* ── ROBOT HEAD ── */}
       <div
         onMouseDown={dragStart}
         onClick={handleClick}
@@ -875,15 +1218,9 @@ export default function App() {
           cursor: "grab", position: "relative", userSelect: "none",
         }}
       >
-        <Orb mode={orbMode} size={ORB_D - 10} />
+        <RobotHead mode={orbMode} size={ORB_D} />
         <div style={{
-          position: "absolute", bottom: 8, left: 0, right: 0,
-          textAlign: "center", fontSize: 8,
-          color: "rgba(0,180,255,0.4)", letterSpacing: "0.22em",
-          pointerEvents: "none", textShadow: "0 0 8px rgba(0,180,255,0.3)",
-        }}>AEGIS</div>
-        <div style={{
-          position: "absolute", top: 10, right: 10,
+          position: "absolute", top: 8, right: 8,
           width: 7, height: 7, borderRadius: "50%",
           background: statusColor, boxShadow: `0 0 10px ${statusColor}`,
           transition: "background 0.5s", pointerEvents: "none",
@@ -953,9 +1290,9 @@ export default function App() {
       )}
 
       <style>{`
-        @keyframes blink   { 0%,100%{opacity:1} 50%{opacity:0} }
+        @keyframes blink       { 0%,100%{opacity:1} 50%{opacity:0} }
         @keyframes slideIn     { from{opacity:0;transform:translateX(-8px) scale(0.97)} to{opacity:1;transform:none} }
-        @keyframes slideInRight { from{opacity:0;transform:translateX(8px)  scale(0.97)} to{opacity:1;transform:none} }
+        @keyframes slideInRight { from{opacity:0;transform:translateX(8px) scale(0.97)} to{opacity:1;transform:none} }
         ::-webkit-scrollbar { width:2px; }
         ::-webkit-scrollbar-thumb { background:rgba(0,180,255,0.15); border-radius:2px; }
         textarea { overflow:hidden; }
